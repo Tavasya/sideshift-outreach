@@ -1,0 +1,8 @@
+# Publish only the script, dependencies, instructions, and master list.
+/*
+!/.gitignore
+!/README.md
+!/sideshift-bulk-invite.mjs
+!/package.json
+!/package-lock.json
+!/SideShift Outreach.csv
