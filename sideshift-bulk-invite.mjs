@@ -104,49 +104,59 @@ async function waitForFlag(page, f, message) {
 // Invite button to its card and read the name from the card's View button.
 const INVITE = { name: 'Invite', exact: true };
 
-async function cardInfo(btn) {
-  return btn.evaluate(el => {
+// Cache normalized membership once, and update it whenever a name is added.
+const norm = (n) => n.toLowerCase().replace(/\s+/g, ' ').trim();
+const normalizedInvites = new WeakMap();
+function invitedNorm(invited) {
+  if (!normalizedInvites.has(invited)) {
+    normalizedInvites.set(invited, new Set([...invited].map(norm)));
+  }
+  return normalizedInvites.get(invited);
+}
+function rememberInvited(invited, name) {
+  const normalized = invitedNorm(invited);
+  invited.add(name);
+  normalized.add(norm(name));
+}
+
+async function findNextUninvited(page, invited) {
+  const buttons = page.getByRole('button', INVITE);
+  // One browser round trip for the whole grid, rather than two per card.
+  // Return locator indexes so clicks still use Playwright's actionability checks.
+  const cards = await buttons.evaluateAll(elements => elements.flatMap((el, index) => {
+    const style = getComputedStyle(el);
+    if (!el.getClientRects().length || style.visibility === 'hidden' || style.visibility === 'collapse') return [];
     let node = el.parentElement;
     while (node && node !== document.body) {
       const labels = [...node.querySelectorAll('button, [role="button"], a')]
         .map(b => (b.getAttribute('aria-label') || b.textContent || '').trim());
       const view = labels.find(l => l.startsWith('View '));
-      const invites = labels.filter(l => l === 'Invite').length;
       if (view) {
-        if (invites !== 1) return null; // went past a single card
+        if (labels.filter(l => l === 'Invite').length !== 1) return [];
         const name = view.slice(5).trim();
-        return { name, messaged: labels.includes(`Message ${name}`) };
+        return name ? [{ index, name, messaged: labels.includes(`Message ${name}`) }] : [];
       }
       node = node.parentElement;
     }
-    return null;
-  });
-}
-
-// Name match that ignores case and extra spaces, so "Jake  smith" and
-// "Jake Smith" count as the same person.
-const norm = (n) => n.toLowerCase().replace(/\s+/g, ' ').trim();
-const invitedNorm = (invited) => new Set([...invited].map(norm));
-
-async function findNextUninvited(page, invited) {
-  for (const btn of await page.getByRole('button', INVITE).all()) {
-    if (!(await btn.isVisible().catch(() => false))) continue;
-    const info = await cardInfo(btn).catch(() => null);
-    if (!info || !info.name) continue;
+    return [];
+  }));
+  const known = invitedNorm(invited);
+  for (const info of cards) {
+    // Processed cards need no further browser calls or repeated name-set builds.
+    if (known.has(norm(info.name))) continue;
     if (info.messaged) {
-      if (!invited.has(info.name)) logInvite(info.name, 'skipped-already-messaged');
-      invited.add(info.name);
+      logInvite(info.name, 'skipped-already-messaged');
+      rememberInvited(invited, info.name);
       continue;
     }
-    if (invited.has(info.name) || invitedNorm(invited).has(norm(info.name))) continue;
     if (EXCLUDED_FIRST_NAMES.test(info.name.split(/\s+/)[0])) {
       logInvite(info.name, 'skipped-excluded-name');
       console.log(`SKIPPED ${info.name} (excluded name)`);
-      invited.add(info.name); // never invite them, and don't re-check every loop
+      rememberInvited(invited, info.name);
       saveInvited(invited);
       continue;
     }
-    return { button: btn, name: info.name };
+    return { button: buttons.nth(info.index), name: info.name };
   }
   return null;
 }
@@ -323,7 +333,7 @@ async function main() {
 
     try {
       const status = await inviteCreator(page, next.button, next.name);
-      invited.add(next.name);
+      rememberInvited(invited, next.name);
       saveInvited(invited);
       logInvite(next.name, status);
       if (status === 'sent') {
@@ -336,7 +346,7 @@ async function main() {
       }
     } catch (err) {
       console.error(`FAILED ${next.name}: ${err.message.split('\n')[0]}`);
-      invited.add(next.name); // don't get stuck retrying a broken card forever
+      rememberInvited(invited, next.name); // don't get stuck retrying a broken card forever
       saveInvited(invited);
       logInvite(next.name, 'failed', err.message.split('\n')[0]);
       await page.keyboard.press('Escape').catch(() => {});
